@@ -84,19 +84,11 @@ esp_err_t S3P__unpack_message(S3P_msg_t * msg, uint8_t * msg_bytes, uint16_t msg
 
     
     msg->destination = UNPACK_STREAM_TO_32_BIT(msg_bytes,0);
-    //printf("msg destination %08lX\n", msg->destination);
-    //(msg_bytes[0] << 24) + (msg_bytes[1] << 16) + (msg_bytes[2] << 8) + msg_bytes[3];
     msg->source = UNPACK_STREAM_TO_32_BIT(msg_bytes,4);
-    //printf("msg source %08lX\n", msg->source);
-    //(msg_bytes[4] << 24) + (msg_bytes[5] << 16) + (msg_bytes[6] << 8) + msg_bytes[7];
     uint32_t read_command = (msg_bytes[8] << 16) + (msg_bytes[9] << 8) + msg_bytes[10]; 
-    //read_command = read_command && 0x00FFFFFF; // remove higher byte which doesn't belong to command which is a 3 byte val
-    
+
     msg->command = (S3P_command_t)read_command;
-    //printf("msg command %02X\n", msg->command);
     msg->argument_length = msg_bytes[11];
-    //printf("arg length %02X\n", msg->argument_length);
-    //uint8_t k = 0;
     uint32_t j = HEADER_LENGTH;
 
     msg->argument = (uint32_t *)malloc(msg->argument_length*sizeof(uint32_t));
@@ -105,7 +97,6 @@ esp_err_t S3P__unpack_message(S3P_msg_t * msg, uint8_t * msg_bytes, uint16_t msg
         msg->argument[k] = UNPACK_STREAM_TO_32_BIT(msg_bytes,j);
         j=j+4;
     }
-    //printf("************* After unpack:\n");
     S3P__print_frame(*msg);
     return ESP_OK;
 }
@@ -125,7 +116,6 @@ void S3P__print_frame(S3P_msg_t msg){
 
 bool S3P__filter_message(S3P_t * s3p, uint8_t * msg_bytes){
     uint32_t read_address = (msg_bytes[0] << 24) + (msg_bytes[1] << 16) + (msg_bytes[2] << 8) + msg_bytes[3];
-    printf("read_address:%08lX\n", read_address);
     return (read_address == s3p->address)||(read_address == 0xFFFFFFFF);
 }   
 
