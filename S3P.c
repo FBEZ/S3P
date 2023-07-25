@@ -130,11 +130,9 @@ esp_err_t S3P__read_message(S3P_t * s3p, uint8_t * msg_bytes, uint16_t msg_lengt
     return ret;  
 }
 
-esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
-    switch(msg->command){
-        case WSH: 
-            printf("\nCommand WSH detected\n");
-            S3P_msg_t msg = {
+esp_err_t S3P__WSH(S3P_t * s3p, S3P_msg_t * msg){
+    printf("\nCommand WSH detected\n");
+            S3P_msg_t reply_msg = {
                 .destination = 0x00000000,
                 .source = s3p->address,
                 .command = IAH,
@@ -142,9 +140,38 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
                 .argument = NULL
             };
             uint32_t msg_length = 0;
-            uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(msg));
-            S3P__pack_message(msg, byte_out, &msg_length); 
+            uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(reply_msg));
+            S3P__pack_message(reply_msg, byte_out, &msg_length); 
             s3p->send_packet_func(byte_out,msg_length);
+            return ESP_OK;
+}
+
+esp_err_t S3P__ACK(S3P_t * s3p, S3P_msg_t * msg){
+    
+    S3P_msg_t * reply_msg = (S3P_msg_t *)malloc(sizeof(S3P_msg_t));
+    reply_msg->destination = msg->source;
+    reply_msg->source = s3p->address;
+    reply_msg->command = ACK;
+    reply_msg->argument_length =1;
+    reply_msg->argument = (uint32_t*)malloc(sizeof(uint32_t));
+
+    reply_msg->argument[0]=(uint32_t)msg->command;
+ 
+    uint32_t msg_length = 0;
+    uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(*reply_msg));
+    S3P__pack_message(*reply_msg, byte_out, &msg_length); 
+    s3p->send_packet_func(byte_out,msg_length);
+    return ESP_OK;
+}
+
+esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
+    switch(msg->command){
+        case WSH: 
+                S3P__WSH(s3p,msg);
+                S3P__ACK(s3p,msg);
+            break;
+        case SAM:
+            S3P__ACK(s3p,msg);
             break;
         default:
             printf("Not implemented yet or ignored\n");

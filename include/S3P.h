@@ -23,7 +23,8 @@ typedef enum{
     SAS, // Set as slave
     STO, // Set time overwrite
     GTA, // get time from all
-    RTA  // reply time to all
+    RTA,  // reply time to all
+    ACK
 }S3P_command_t;
 
 
