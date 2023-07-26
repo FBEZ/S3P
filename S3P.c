@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include "S3P.h"
+#include <time.h>
+#include <sys/time.h>
 
 #define SOURCE_ADDRESS_LENGTH 4
 #define DESTINATION_ADDRESS_LENGTH 4
@@ -39,6 +41,9 @@ S3P_t * S3P__create(uint32_t address,
     S3P_t * ret = (S3P_t *)malloc(sizeof(S3P_t));
     ret->address = address;
     ret->send_packet_func = send_packet_func;
+    ret->clock_status = UNSET;
+    ret->op_status = UNDEFINED;
+
     return ret;
 }
 
@@ -82,7 +87,6 @@ esp_err_t S3P__pack_message(S3P_msg_t msg, uint8_t * byte_out, uint32_t * byte_o
 
 esp_err_t S3P__unpack_message(S3P_msg_t * msg, uint8_t * msg_bytes, uint16_t msg_length){
 
-    
     msg->destination = UNPACK_STREAM_TO_32_BIT(msg_bytes,0);
     msg->source = UNPACK_STREAM_TO_32_BIT(msg_bytes,4);
     uint32_t read_command = (msg_bytes[8] << 16) + (msg_bytes[9] << 8) + msg_bytes[10]; 
@@ -97,7 +101,7 @@ esp_err_t S3P__unpack_message(S3P_msg_t * msg, uint8_t * msg_bytes, uint16_t msg
         msg->argument[k] = UNPACK_STREAM_TO_32_BIT(msg_bytes,j);
         j=j+4;
     }
-    S3P__print_frame(*msg);
+    //S3P__print_frame(*msg);
     return ESP_OK;
 }
 
@@ -164,19 +168,57 @@ esp_err_t S3P__ACK(S3P_t * s3p, S3P_msg_t * msg){
     return ESP_OK;
 }
 
+
+esp_err_t S3P__STO(S3P_t * s3p, S3P_msg_t * msg){
+
+    if(msg->argument_length!=2){
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = msg->argument[0];
+    tv.tv_usec =msg->argument[1];
+
+    settimeofday(&tv,0);
+    return ESP_OK;
+}
+
+void S3P__print_current_time(){
+    struct timeval tv;
+    gettimeofday(&tv, NULL /* tz */);
+    printf("time: %lld\n", tv.tv_sec);
+    printf("us: %ld\n", tv.tv_usec);
+    char tmbuf[64];
+    strftime(tmbuf, sizeof(tmbuf), "%Y-%m-%d %H:%M:%S", tv.tv_sec);
+    printf("%s\n", tmbuf);
+}
+
 esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
     switch(msg->command){
         case WSH: 
+                printf("Detected WSH\n");
                 S3P__WSH(s3p,msg);
                 S3P__ACK(s3p,msg);
             break;
         case SAM:
+            printf("Detected SAM\n");
+            s3p->op_status=MASTER;
+            S3P__ACK(s3p,msg);
+            break;
+        case SAS:
+            printf("Detected SAS\n");
+            s3p->op_status=SLAVE;
+            S3P__ACK(s3p,msg);
+            break;
+        case STO:
+            printf("Detected STO\n");
+            S3P__STO(s3p,msg);
             S3P__ACK(s3p,msg);
             break;
         default:
             printf("Not implemented yet or ignored\n");
     }
-
+    S3P__print_current_time();
     return ESP_OK;
 }
 
