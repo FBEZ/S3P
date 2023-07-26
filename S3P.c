@@ -185,12 +185,15 @@ esp_err_t S3P__STO(S3P_t * s3p, S3P_msg_t * msg){
 
 void S3P__print_current_time(){
     struct timeval tv;
+    struct tm *nowtm;
+
     gettimeofday(&tv, NULL /* tz */);
-    printf("time: %lld\n", tv.tv_sec);
-    printf("us: %ld\n", tv.tv_usec);
     char tmbuf[64];
-    strftime(tmbuf, sizeof(tmbuf), "%Y-%m-%d %H:%M:%S", tv.tv_sec);
-    printf("%s\n", tmbuf);
+    nowtm = localtime(&tv.tv_sec);
+    strftime(tmbuf, sizeof(tmbuf), "%d-%m-%Y %H:%M:%S", nowtm);
+    
+    printf("GMT: %s\n", tmbuf);
+    printf("us: %ld\n", tv.tv_usec);
 }
 
 esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
