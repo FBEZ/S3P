@@ -9,6 +9,9 @@
 #define ARGUMENT_LENGTH_LENGTH 1
 #define HEADER_LENGTH ( SOURCE_ADDRESS_LENGTH + DESTINATION_ADDRESS_LENGTH + COMMAND_LENGTH + ARGUMENT_LENGTH_LENGTH)
 
+#define BROADCAST_ADDRESS 0xFFFFFFFF
+#define TYPICAL_DELAY_US 60
+
 #define UNPACK_STREAM_TO_32_BIT(byte_array,from) ((byte_array[(from)] << 24) + (byte_array[1+(from)] << 16) + (byte_array[2+(from)] << 8) + byte_array[3+(from)])
 
 
@@ -24,11 +27,24 @@ typedef enum{
     SET
 }clock_status_t;
 
+
+typedef struct timeval watch_time_t;
+
+typedef struct{ // naming as per typical PTP graph
+    watch_time_t t1;
+    watch_time_t t2;
+    watch_time_t t3;
+    watch_time_t t4;
+    uint8_t step;
+}watch_time_set_t;
+
+
 struct S3P_t{
     op_status_t op_status;
     clock_status_t clock_status;
     uint32_t address;
     esp_err_t (*send_packet_func)(uint8_t *, uint16_t);
+    watch_time_set_t watch_time_set;
 };
 
 
@@ -43,6 +59,7 @@ S3P_t * S3P__create(uint32_t address,
     ret->send_packet_func = send_packet_func;
     ret->clock_status = UNSET;
     ret->op_status = UNDEFINED;
+    ret->watch_time_set.step=0;
 
     return ret;
 }
@@ -150,12 +167,17 @@ esp_err_t S3P__WSH(S3P_t * s3p, S3P_msg_t * msg){
             return ESP_OK;
 }
 
-esp_err_t S3P__ACK(S3P_t * s3p, S3P_msg_t * msg){
-    
+
+esp_err_t S3P__send_message_empty(S3P_t * s3p, S3P_msg_t * msg, S3P_command_t command){
+    if(!((command==ACK) || (command == DRQ) )){
+        return ESP_ERR_INVALID_ARG;
+    }
+
+// todo: remove argument if DRQ is selected instead of ack
     S3P_msg_t * reply_msg = (S3P_msg_t *)malloc(sizeof(S3P_msg_t));
     reply_msg->destination = msg->source;
     reply_msg->source = s3p->address;
-    reply_msg->command = ACK;
+    reply_msg->command = command;
     reply_msg->argument_length =1;
     reply_msg->argument = (uint32_t*)malloc(sizeof(uint32_t));
 
@@ -191,37 +213,149 @@ void S3P__print_current_time(){
     char tmbuf[64];
     nowtm = localtime(&tv.tv_sec);
     strftime(tmbuf, sizeof(tmbuf), "%d-%m-%Y %H:%M:%S", nowtm);
-    
+
     printf("GMT: %s\n", tmbuf);
     printf("us: %ld\n", tv.tv_usec);
+}
+
+
+esp_err_t S3P__SYN(S3P_t * s3p, S3P_msg_t * msg){
+
+    //save t2 fast
+    struct timeval t2;
+    gettimeofday(&t2, NULL /* tz */);
+    
+    S3P__send_message_empty(s3p,msg,DRQ);
+
+    //saving t1 and t2 first required parameter for delay measurement
+    s3p->watch_time_set.step=1;
+    s3p->watch_time_set.t1.tv_sec=msg->argument[0];
+    s3p->watch_time_set.t1.tv_usec=msg->argument[1];
+
+    s3p->watch_time_set.t2.tv_sec=t2.tv_sec;
+    s3p->watch_time_set.t2.tv_usec=t2.tv_usec;
+
+    return ESP_OK;
+}
+
+esp_err_t S3P__DRE(S3P_t * s3p, S3P_msg_t * msg){
+
+    //save t2 fast
+    struct timeval t4;
+    gettimeofday(&t4, NULL /* tz */);
+    
+    //S3P__send_message_empty(s3p,msg,DRQ);
+
+    //saving t1 and t2 first required parameter for delay measurement
+    s3p->watch_time_set.step=2;
+    s3p->watch_time_set.t3.tv_sec=msg->argument[0];
+    s3p->watch_time_set.t3.tv_usec=msg->argument[1];
+
+    s3p->watch_time_set.t4.tv_sec=t4.tv_sec;
+    s3p->watch_time_set.t4.tv_usec=t4.tv_usec;
+
+    // todo: calculate offset using time_t
+
+    return ESP_OK;
+}
+
+
+esp_err_t S3P__send_message_with_time(S3P_t * s3p, S3P_msg_t * msg, S3P_command_t command){
+
+    uint32_t reply_destination = 0;
+    if(command == SYN){
+        reply_destination = BROADCAST_ADDRESS;
+    }else if (command == DRE || command == RTA)
+    {
+        reply_destination = msg->source;
+    }else{
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    S3P_msg_t * reply_msg = (S3P_msg_t *)malloc(sizeof(S3P_msg_t));
+    reply_msg->destination = reply_destination; // broadcast
+    reply_msg->source = s3p->address;
+    reply_msg->command = command;
+    reply_msg->argument_length =2;
+    reply_msg->argument = (uint32_t*)malloc(2*sizeof(uint32_t));
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL /* tz */);
+
+    reply_msg->argument[0]=(uint32_t)tv.tv_sec;
+    reply_msg->argument[1]=(uint32_t)tv.tv_usec;
+ 
+    uint32_t msg_length = 0;
+    uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(*reply_msg));
+    S3P__pack_message(*reply_msg, byte_out, &msg_length); 
+    s3p->send_packet_func(byte_out,msg_length);
+    printf("time sent: %lld\n", tv.tv_sec);
+    printf("us sent: %ld\n", tv.tv_usec);
+    return ESP_OK;
 }
 
 esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
     switch(msg->command){
         case WSH: 
                 printf("Detected WSH\n");
-                S3P__WSH(s3p,msg);
-                S3P__ACK(s3p,msg);
+                //S3P__WSH(s3p,msg);
+                S3P__send_message_empty(s3p,msg,ACK);
             break;
         case SAM:
             printf("Detected SAM\n");
             s3p->op_status=MASTER;
-            S3P__ACK(s3p,msg);
+            S3P__send_message_empty(s3p,msg,ACK);
             break;
         case SAS:
             printf("Detected SAS\n");
             s3p->op_status=SLAVE;
-            S3P__ACK(s3p,msg);
+            S3P__send_message_empty(s3p,msg,ACK);
             break;
         case STO:
             printf("Detected STO\n");
             S3P__STO(s3p,msg);
-            S3P__ACK(s3p,msg);
+            S3P__send_message_empty(s3p,msg,ACK);
+            break;
+        case GTA:
+            printf("Detected GTA\n");
+            S3P__send_message_with_time(s3p,msg,RTA);
+            break;
+        case SYN:
+            printf("Detected SYN\n");
+            if(s3p->op_status==SLAVE) // if not slave, ignore
+                S3P__SYN(s3p,msg);
+            else{
+                printf("But I'm %d", s3p->op_status);
+            }
+            break;
+        case DRQ:
+            printf("Detected DRQ\n");
+            if(s3p->op_status==MASTER) // if not master, ignore
+                S3P__send_message_with_time(s3p,msg,DRE);
+            else{
+                printf("But I'm %d", s3p->op_status);
+            }
+            break;
+        case DRE:
+            printf("Detected DRE\n");
+            if(s3p->op_status==SLAVE) // if not slave, ignore
+                S3P__DRE(s3p,msg);
+            else{
+                printf("But I'm %d", s3p->op_status);
+            }
             break;
         default:
             printf("Not implemented yet or ignored\n");
     }
     S3P__print_current_time();
     return ESP_OK;
+}
+
+esp_err_t S3P__send_synch(S3P_t * s3p){
+    if(s3p->op_status!=MASTER){ // only master performs this routine
+        return ESP_OK;
+    }
+
+    return S3P__send_message_with_time(s3p, NULL, SYN);
 }
 

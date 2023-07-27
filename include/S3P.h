@@ -23,8 +23,11 @@ typedef enum{
     SAS, // Set as slave
     STO, // Set time overwrite
     GTA, // get time from all
-    RTA,  // reply time to all
-    ACK
+    RTA,  // reply time from all
+    ACK, // acknoledgment
+    SYN, // synch 
+    DRQ, // delay request
+    DRE  //delay response
 }S3P_command_t;
 
 
@@ -63,5 +66,14 @@ bool S3P__filter_message(S3P_t * s3p, uint8_t * msg_bytes);
 uint32_t S3P__get_message_length(S3P_msg_t msg);
 
 esp_err_t S3P__read_message(S3P_t * s3p, uint8_t * msg_bytes, uint16_t msg_length);
+
+/**
+ * @brief Synch function to be called every second (if the node is master
+ * )
+ * 
+ * @param s3p 
+ * @return esp_err_t 
+ */
+esp_err_t S3P__send_synch(S3P_t * s3p);
 
 #endif /*S3P_H*/
