@@ -284,7 +284,7 @@ esp_err_t S3P__DRE(S3P_t * s3p, S3P_msg_t * msg){
 
     // *** Start Critical fast execution: here everything as timeval because of gettime and settime
     gettimeofday(&t_now, NULL /* tz */);
-    timeradd(&t_now,&tv_offset, &t_new);
+    timersub(&t_now,&tv_offset, &t_new);
     settimeofday(&t_new, 0);
     // *** End critical fast execution
     s3p->watch_time_set.t4=t4;
