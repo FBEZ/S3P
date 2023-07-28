@@ -11,10 +11,31 @@
 
 #define BROADCAST_ADDRESS 0xFFFFFFFF
 #define TYPICAL_DELAY_US 60
+#define TIME_SETTING_OFFSET 0 
 
+#define TIMEVAL_TO_US_TIME(tv_sec,tv_usec) (time_us_t)(tv_sec)*1000000L+(time_us_t)(tv_usec)
+#define US_TIME_TO_TIMEVAL(us_time, tv) \
+    do{ \
+    (tv).tv_sec  = (us_time)/1000000; \
+    (tv).tv_usec = (us_time)%1000000; \
+    }while(0)
 #define UNPACK_STREAM_TO_32_BIT(byte_array,from) ((byte_array[(from)] << 24) + (byte_array[1+(from)] << 16) + (byte_array[2+(from)] << 8) + byte_array[3+(from)])
+#define PRINT_TIMEVAL(tv) \
+  do { \
+    printf("Time (s): %lld\n", (tv).tv_sec); \
+    printf("Us  (us): %ld\n", (tv).tv_usec); \
+  } while (0)
 
-
+#define PRINT_S3P(s3p) \
+  do { \
+    printf(" *** S3P: %04lX ***\n", (s3p).address); \
+    printf("Op Status: %d\n", (s3p).op_status); \
+    printf("Clock Status: %d\n", (s3p).clock_status); \
+    printf("t1: %lld\n", (s3p).watch_time_set.t1); \
+    printf("t2: %lld\n", (s3p).watch_time_set.t2); \
+    printf("t3: %lld\n", (s3p).watch_time_set.t3); \
+    printf("t4: %lld\n", (s3p).watch_time_set.t4); \
+  } while (0)
 
 typedef enum{
     UNDEFINED,
@@ -30,12 +51,13 @@ typedef enum{
 
 typedef struct timeval watch_time_t;
 
+typedef int64_t time_us_t;
+
 typedef struct{ // naming as per typical PTP graph
-    watch_time_t t1;
-    watch_time_t t2;
-    watch_time_t t3;
-    watch_time_t t4;
-    uint8_t step;
+    time_us_t t1;
+    time_us_t t2;
+    time_us_t t3;
+    time_us_t t4;
 }watch_time_set_t;
 
 
@@ -43,6 +65,7 @@ struct S3P_t{
     op_status_t op_status;
     clock_status_t clock_status;
     uint32_t address;
+    struct timeval last_msg_timestamp;
     esp_err_t (*send_packet_func)(uint8_t *, uint16_t);
     watch_time_set_t watch_time_set;
 };
@@ -59,7 +82,6 @@ S3P_t * S3P__create(uint32_t address,
     ret->send_packet_func = send_packet_func;
     ret->clock_status = UNSET;
     ret->op_status = UNDEFINED;
-    ret->watch_time_set.step=0;
 
     return ret;
 }
@@ -142,6 +164,7 @@ bool S3P__filter_message(S3P_t * s3p, uint8_t * msg_bytes){
 
 
 esp_err_t S3P__read_message(S3P_t * s3p, uint8_t * msg_bytes, uint16_t msg_length){
+     gettimeofday(&s3p->last_msg_timestamp, NULL /* tz */); // save it asap for later use
      S3P_msg_t * msg = (S3P_msg_t*)malloc(sizeof(S3P_msg_t));
      esp_err_t ret = S3P__unpack_message(msg, msg_bytes, msg_length);
 
@@ -221,41 +244,50 @@ void S3P__print_current_time(){
 
 esp_err_t S3P__SYN(S3P_t * s3p, S3P_msg_t * msg){
 
-    //save t2 fast
-    struct timeval t2;
-    gettimeofday(&t2, NULL /* tz */);
-    
+    //t2 is the timestamp
+    struct timeval t3;
     S3P__send_message_empty(s3p,msg,DRQ);
+    gettimeofday(&t3, NULL /* tz */);
+    //End time critical section
 
     //saving t1 and t2 first required parameter for delay measurement
-    s3p->watch_time_set.step=1;
-    s3p->watch_time_set.t1.tv_sec=msg->argument[0];
-    s3p->watch_time_set.t1.tv_usec=msg->argument[1];
-
-    s3p->watch_time_set.t2.tv_sec=t2.tv_sec;
-    s3p->watch_time_set.t2.tv_usec=t2.tv_usec;
+    s3p->watch_time_set.t1=TIMEVAL_TO_US_TIME(msg->argument[0],msg->argument[1]);
+    s3p->watch_time_set.t2=TIMEVAL_TO_US_TIME(s3p->last_msg_timestamp.tv_sec,s3p->last_msg_timestamp.tv_usec);
+    s3p->watch_time_set.t3=TIMEVAL_TO_US_TIME(t3.tv_sec,t3.tv_usec);
 
     return ESP_OK;
 }
 
 esp_err_t S3P__DRE(S3P_t * s3p, S3P_msg_t * msg){
 
-    //save t2 fast
-    struct timeval t4;
-    gettimeofday(&t4, NULL /* tz */);
+
+    struct timeval t_now;
+    struct timeval t_new;
+
+    time_us_t t4 = TIMEVAL_TO_US_TIME(msg->argument[0],msg->argument[1]);
+
+
+    // tdelay = ((t4-t1)-(t3-t2))/2
+    time_us_t time_delay = ((t4                     - s3p->watch_time_set.t1) - 
+                  (s3p->watch_time_set.t3 - s3p->watch_time_set.t2))/2;
     
-    //S3P__send_message_empty(s3p,msg,DRQ);
+    // toffset = t2-t1-tdelay
+    time_us_t time_offset = s3p->watch_time_set.t2-s3p->watch_time_set.t1-time_delay;
 
-    //saving t1 and t2 first required parameter for delay measurement
-    s3p->watch_time_set.step=2;
-    s3p->watch_time_set.t3.tv_sec=msg->argument[0];
-    s3p->watch_time_set.t3.tv_usec=msg->argument[1];
+    printf("Calculated Delay (us):%lld\n", time_delay);
+    printf("Calculated Offset (us):%lld\n", time_offset);
 
-    s3p->watch_time_set.t4.tv_sec=t4.tv_sec;
-    s3p->watch_time_set.t4.tv_usec=t4.tv_usec;
+    struct timeval tv_offset;
+    US_TIME_TO_TIMEVAL(time_offset,tv_offset);
 
-    // todo: calculate offset using time_t
+    // Setting the new time:
 
+    // *** Start Critical fast execution: here everything as timeval because of gettime and settime
+    gettimeofday(&t_now, NULL /* tz */);
+    timeradd(&t_now,&tv_offset, &t_new);
+    settimeofday(&t_new, 0);
+    // *** End critical fast execution
+    s3p->watch_time_set.t4=t4;
     return ESP_OK;
 }
 
@@ -282,24 +314,28 @@ esp_err_t S3P__send_message_with_time(S3P_t * s3p, S3P_msg_t * msg, S3P_command_
     struct timeval tv;
     gettimeofday(&tv, NULL /* tz */);
 
-    reply_msg->argument[0]=(uint32_t)tv.tv_sec;
-    reply_msg->argument[1]=(uint32_t)tv.tv_usec;
+    if(command == DRQ){ // here the time must be the timestamp
+        reply_msg->argument[0]=(uint32_t)s3p->last_msg_timestamp.tv_sec;
+        reply_msg->argument[1]=(uint32_t)s3p->last_msg_timestamp.tv_usec;
+    }else{
+        reply_msg->argument[0]=(uint32_t)tv.tv_sec;
+        reply_msg->argument[1]=(uint32_t)tv.tv_usec;
+    }
  
     uint32_t msg_length = 0;
     uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(*reply_msg));
     S3P__pack_message(*reply_msg, byte_out, &msg_length); 
     s3p->send_packet_func(byte_out,msg_length);
-    printf("time sent: %lld\n", tv.tv_sec);
-    printf("us sent: %ld\n", tv.tv_usec);
+    //printf("time sent: %lld\n", tv.tv_sec);
+    //printf("us sent: %ld\n", tv.tv_usec);
     return ESP_OK;
 }
 
 esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
     switch(msg->command){
         case WSH: 
-                printf("Detected WSH\n");
-                //S3P__WSH(s3p,msg);
-                S3P__send_message_empty(s3p,msg,ACK);
+            printf("Detected WSH\n");
+            S3P__send_message_empty(s3p,msg,ACK);
             break;
         case SAM:
             printf("Detected SAM\n");
@@ -320,23 +356,23 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
             printf("Detected GTA\n");
             S3P__send_message_with_time(s3p,msg,RTA);
             break;
-        case SYN:
-            printf("Detected SYN\n");
+        case SYN: // todo: listen only if right step
+            printf("Detected SYN\n"); 
             if(s3p->op_status==SLAVE) // if not slave, ignore
                 S3P__SYN(s3p,msg);
             else{
-                printf("But I'm %d", s3p->op_status);
+                printf("But I'm %d\n", s3p->op_status);
             }
             break;
-        case DRQ:
+        case DRQ: 
             printf("Detected DRQ\n");
             if(s3p->op_status==MASTER) // if not master, ignore
                 S3P__send_message_with_time(s3p,msg,DRE);
             else{
-                printf("But I'm %d", s3p->op_status);
+                printf("But I'm %d\n", s3p->op_status);
             }
             break;
-        case DRE:
+        case DRE: // todo: listen only if right step
             printf("Detected DRE\n");
             if(s3p->op_status==SLAVE) // if not slave, ignore
                 S3P__DRE(s3p,msg);
@@ -347,6 +383,8 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
         default:
             printf("Not implemented yet or ignored\n");
     }
+    printf("\n\n");
+    PRINT_S3P(*s3p);
     S3P__print_current_time();
     return ESP_OK;
 }
