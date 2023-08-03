@@ -31,11 +31,16 @@
     printf(" *** S3P: %04lX ***\n", (s3p).address); \
     printf("Op Status: %d\n", (s3p).op_status); \
     printf("Clock Status: %d\n", (s3p).clock_status); \
-    printf("t1: %lld\n", (s3p).watch_time_set.t1); \
-    printf("t2: %lld\n", (s3p).watch_time_set.t2); \
-    printf("t3: %lld\n", (s3p).watch_time_set.t3); \
-    printf("t4: %lld\n", (s3p).watch_time_set.t4); \
   } while (0)
+
+#define PRINT_MEASUREMENT_SET(s3p) \
+  do { \
+    printf(" *** S3P: %04lX ***\n", (s3p).address); \
+    printf("Time next measurement: %lld\n", (s3p).measurement_config.t_next_measurement); \
+    printf("Sampling period (us): %lld\n", (s3p).measurement_config.t_sampling_period); \
+    printf("Number of sample left: %lld\n", (s3p).measurement_config.sampling_left); \
+  } while (0)
+
 
 typedef enum{
     UNDEFINED,
@@ -44,8 +49,9 @@ typedef enum{
 }op_status_t;
 
 typedef enum{
-    UNSET,
-    SET
+    UNSYNCHED,
+    SYNCHED,
+    MEASURING
 }clock_status_t;
 
 
@@ -60,14 +66,22 @@ typedef struct{ // naming as per typical PTP graph
     time_us_t t4;
 }watch_time_set_t;
 
+typedef struct{
+    time_us_t t_next_measurement;
+    time_us_t t_sampling_period;
+    uint64_t sampling_left;
+}measurement_config_t;
+
 
 struct S3P_t{
     op_status_t op_status;
     clock_status_t clock_status;
     uint32_t address;
     struct timeval last_msg_timestamp;
-    esp_err_t (*send_packet_func)(uint8_t *, uint16_t);
+    esp_err_t (*send_packet_func)(uint8_t *, uint16_t); // send packets through interface
+    void (*trigger_sampling_func)(); // trigger sampling measurement
     watch_time_set_t watch_time_set;
+    measurement_config_t measurement_config;
 };
 
 
@@ -75,12 +89,14 @@ void S3P__print_frame(S3P_msg_t msg);
 esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg);
 
 S3P_t * S3P__create(uint32_t address,
-                    esp_err_t (*send_packet_func)(uint8_t *, uint16_t)){
+                    esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
+                    void (*trigger_sampling_func)(),
+                    void (*start_timer_func)()){
     
     S3P_t * ret = (S3P_t *)malloc(sizeof(S3P_t));
     ret->address = address;
     ret->send_packet_func = send_packet_func;
-    ret->clock_status = UNSET;
+    ret->clock_status = UNSYNCHED;
     ret->op_status = UNDEFINED;
 
     return ret;
@@ -228,6 +244,19 @@ esp_err_t S3P__STO(S3P_t * s3p, S3P_msg_t * msg){
     return ESP_OK;
 }
 
+esp_err_t S3P__MCO(S3P_t * s3p, S3P_msg_t * msg){
+
+    if(msg->argument_length!=5){
+        return ESP_ERR_INVALID_ARG;
+    }
+    s3p->measurement_config.t_next_measurement = TIMEVAL_TO_US_TIME(msg->argument[0],msg->argument[1]);
+    s3p->measurement_config.sampling_left = ((uint64_t)msg->argument[2]<<32)+((int64_t)(msg->argument[2]));
+    s3p->measurement_config.t_sampling_period = (time_us_t)msg->argument[4];
+    s3p->clock_status = MEASURING;
+    PRINT_MEASUREMENT_SET(*s3p);
+    return ESP_OK;
+}
+
 void S3P__print_current_time(){
     struct timeval tv;
     struct tm *nowtm;
@@ -288,6 +317,7 @@ esp_err_t S3P__DRE(S3P_t * s3p, S3P_msg_t * msg){
     settimeofday(&t_new, 0);
     // *** End critical fast execution
     s3p->watch_time_set.t4=t4;
+    s3p->clock_status = SYNCHED;
     return ESP_OK;
 }
 
@@ -359,7 +389,7 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
         case SYN: // todo: listen only if right step
             printf("Detected SYN\n"); 
             if(s3p->op_status==SLAVE) // if not slave, ignore
-                S3P__SYN(s3p,msg);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(S3P__SYN(s3p,msg));
             else{
                 printf("But I'm %d\n", s3p->op_status);
             }
@@ -367,7 +397,7 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
         case DRQ: 
             printf("Detected DRQ\n");
             if(s3p->op_status==MASTER) // if not master, ignore
-                S3P__send_message_with_time(s3p,msg,DRE);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(S3P__send_message_with_time(s3p,msg,DRE));
             else{
                 printf("But I'm %d\n", s3p->op_status);
             }
@@ -375,10 +405,14 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
         case DRE: // todo: listen only if right step
             printf("Detected DRE\n");
             if(s3p->op_status==SLAVE) // if not slave, ignore
-                S3P__DRE(s3p,msg);
+                ESP_ERROR_CHECK_WITHOUT_ABORT(S3P__DRE(s3p,msg));
             else{
                 printf("But I'm %d", s3p->op_status);
             }
+            break;
+        case MCO:
+            printf("Detected MCO\n");
+            ESP_ERROR_CHECK_WITHOUT_ABORT(S3P__MCO(s3p,msg));
             break;
         default:
             printf("Not implemented yet or ignored\n");
@@ -395,5 +429,24 @@ esp_err_t S3P__send_synch(S3P_t * s3p){
     }
 
     return S3P__send_message_with_time(s3p, NULL, SYN);
+}
+
+void S3P__timer_elapsed(S3P_t * s3p){
+    //todo
+}
+
+void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size){
+        printf("\nSending samples\n");
+            S3P_msg_t reply_msg = {
+                .destination = 0x00000000,
+                .source = s3p->address,
+                .command = MSR,
+                .argument_length = size,
+                .argument = data
+            };
+            uint32_t msg_length = 0;
+            uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(reply_msg));
+            S3P__pack_message(reply_msg, byte_out, &msg_length); 
+            s3p->send_packet_func(byte_out,msg_length);
 }
 

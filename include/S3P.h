@@ -27,7 +27,9 @@ typedef enum{
     ACK, // acknoledgment
     SYN, // synch 
     DRQ, // delay request
-    DRE  //delay response
+    DRE,  //delay response
+    MCO, // measurement config
+    MSR // measurment set report
 }S3P_command_t;
 
 
@@ -43,7 +45,9 @@ typedef struct S3P_t S3P_t;
 
 
 S3P_t * S3P__create(uint32_t address,
-                    esp_err_t (*send_packet_func)(uint8_t *, uint16_t));
+                    esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
+                    void (*trigger_sampling_func)(),
+                    void (*start_timer_func)());
 
 //esp_err_t S3P_filter_message(S3P_t s3p, uint8_t* msg);
 
@@ -75,5 +79,21 @@ esp_err_t S3P__read_message(S3P_t * s3p, uint8_t * msg_bytes, uint16_t msg_lengt
  * @return esp_err_t 
  */
 esp_err_t S3P__send_synch(S3P_t * s3p);
+
+
+/**
+ * @brief Function to be called to send the sample array to the S3P 
+ * 
+ * @param data the measurement set
+ * @param size size of the measurement set
+ */
+void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size);
+
+/**
+ * @brief Function to be called when the external timer is elapsed
+ * 
+ * @param s3p 
+ */
+void S3P__timer_elapsed(S3P_t * s3p);
 
 #endif /*S3P_H*/
