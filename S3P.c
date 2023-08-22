@@ -79,7 +79,8 @@ struct S3P_t{
     uint32_t address;
     struct timeval last_msg_timestamp;
     esp_err_t (*send_packet_func)(uint8_t *, uint16_t); // send packets through interface
-    void (*trigger_sampling_func)(); // trigger sampling measurement
+    void (*trigger_sampling_func)(uint64_t); // trigger sampling measurement
+    void (*start_timer_func)(); 
     watch_time_set_t watch_time_set;
     measurement_config_t measurement_config;
 };
@@ -90,12 +91,14 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg);
 
 S3P_t * S3P__create(uint32_t address,
                     esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
-                    void (*trigger_sampling_func)(),
+                    void (*trigger_sampling_func)(uint64_t), //the sample number
                     void (*start_timer_func)()){
     
     S3P_t * ret = (S3P_t *)malloc(sizeof(S3P_t));
     ret->address = address;
     ret->send_packet_func = send_packet_func;
+    ret->trigger_sampling_func = trigger_sampling_func;
+    ret->start_timer_func = start_timer_func;
     ret->clock_status = UNSYNCHED;
     ret->op_status = UNDEFINED;
 
@@ -432,7 +435,8 @@ esp_err_t S3P__send_synch(S3P_t * s3p){
 }
 
 void S3P__timer_elapsed(S3P_t * s3p){
-    //todo
+        printf("timer elapsed\n");
+        s3p->trigger_sampling_func(0);
 }
 
 void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size){
@@ -445,8 +449,12 @@ void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size){
                 .argument = data
             };
             uint32_t msg_length = 0;
+            //printf("\nBefore malloc\n");
             uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(reply_msg));
+            //printf("\nBefore pack message\n");
             S3P__pack_message(reply_msg, byte_out, &msg_length); 
+            //printf("\nBefore send_packet_func\n");
             s3p->send_packet_func(byte_out,msg_length);
 }
+
 
