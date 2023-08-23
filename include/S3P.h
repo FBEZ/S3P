@@ -16,6 +16,8 @@
 #include "esp_err.h"
 #include "ethernet_utils.h"
 
+typedef int64_t time_us_t;
+
 typedef enum{
     WSH, // Who's here
     IAH, // I am here
@@ -29,7 +31,8 @@ typedef enum{
     DRQ, // delay request
     DRE,  //delay response
     MCO, // measurement config
-    MSR // measurment set report
+    MSR, // measurment set report
+    RST // reset
 }S3P_command_t;
 
 
@@ -47,7 +50,8 @@ typedef struct S3P_t S3P_t;
 S3P_t * S3P__create(uint32_t address,
                     esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
                     void (*trigger_sampling_func)(uint64_t),
-                    void (*start_timer_func)());
+                    void (*start_timer_func)(uint64_t),
+                    void (*soft_restart)());
 
 //esp_err_t S3P_filter_message(S3P_t s3p, uint8_t* msg);
 

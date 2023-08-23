@@ -57,7 +57,6 @@ typedef enum{
 
 typedef struct timeval watch_time_t;
 
-typedef int64_t time_us_t;
 
 typedef struct{ // naming as per typical PTP graph
     time_us_t t1;
@@ -79,8 +78,9 @@ struct S3P_t{
     uint32_t address;
     struct timeval last_msg_timestamp;
     esp_err_t (*send_packet_func)(uint8_t *, uint16_t); // send packets through interface
-    void (*trigger_sampling_func)(uint64_t); // trigger sampling measurement
-    void (*start_timer_func)(); 
+    void (*trigger_sampling_func)(uint64_t); // parameter as sample reference. trigger sampling measurement
+    void (*start_timer_func)(void *); // parameter for timer handle in oo programming
+    void (*soft_restart)(); // for reset command
     watch_time_set_t watch_time_set;
     measurement_config_t measurement_config;
 };
@@ -92,7 +92,8 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg);
 S3P_t * S3P__create(uint32_t address,
                     esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
                     void (*trigger_sampling_func)(uint64_t), //the sample number
-                    void (*start_timer_func)()){
+                    void (*start_timer_func)(uint64_t),
+                    void (*soft_restart)()){
     
     S3P_t * ret = (S3P_t *)malloc(sizeof(S3P_t));
     ret->address = address;
@@ -101,6 +102,7 @@ S3P_t * S3P__create(uint32_t address,
     ret->start_timer_func = start_timer_func;
     ret->clock_status = UNSYNCHED;
     ret->op_status = UNDEFINED;
+
 
     return ret;
 }
@@ -253,10 +255,16 @@ esp_err_t S3P__MCO(S3P_t * s3p, S3P_msg_t * msg){
         return ESP_ERR_INVALID_ARG;
     }
     s3p->measurement_config.t_next_measurement = TIMEVAL_TO_US_TIME(msg->argument[0],msg->argument[1]);
-    s3p->measurement_config.sampling_left = ((uint64_t)msg->argument[2]<<32)+((int64_t)(msg->argument[2]));
+    s3p->measurement_config.sampling_left = ((uint64_t)msg->argument[2]<<32)+((uint64_t)(msg->argument[3]));
     s3p->measurement_config.t_sampling_period = (time_us_t)msg->argument[4];
     s3p->clock_status = MEASURING;
     PRINT_MEASUREMENT_SET(*s3p);
+
+    struct timeval t_now;
+    gettimeofday(&t_now, NULL /* tz */);
+    s3p->start_timer_func((uint64_t)(s3p->measurement_config.t_next_measurement - 
+                                          TIMEVAL_TO_US_TIME(t_now.tv_sec, t_now.tv_usec)));
+
     return ESP_OK;
 }
 
@@ -417,6 +425,10 @@ esp_err_t S3P__interpret_command(S3P_t * s3p, S3P_msg_t* msg){
             printf("Detected MCO\n");
             ESP_ERROR_CHECK_WITHOUT_ABORT(S3P__MCO(s3p,msg));
             break;
+        case RST:
+             printf("Detected RST\n");
+             s3p->soft_restart();
+             break;
         default:
             printf("Not implemented yet or ignored\n");
     }
@@ -435,8 +447,12 @@ esp_err_t S3P__send_synch(S3P_t * s3p){
 }
 
 void S3P__timer_elapsed(S3P_t * s3p){
-        printf("timer elapsed\n");
-        s3p->trigger_sampling_func(0);
+        s3p->trigger_sampling_func(s3p->measurement_config.sampling_left);
+        if(s3p->measurement_config.sampling_left>0){ // still measurements to do
+            s3p->start_timer_func((uint64_t)s3p->measurement_config.t_sampling_period);
+            s3p->measurement_config.sampling_left--;
+            //printf("timer elapsed and restarted\n");
+        }
 }
 
 void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size){
