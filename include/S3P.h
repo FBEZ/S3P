@@ -51,6 +51,7 @@ S3P_t * S3P__create(uint32_t address,
                     esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
                     void (*trigger_sampling_func)(uint64_t),
                     void (*start_timer_func)(uint64_t),
+                    void (*stop_timer_func)(),
                     void (*soft_restart)());
 
 //esp_err_t S3P_filter_message(S3P_t s3p, uint8_t* msg);

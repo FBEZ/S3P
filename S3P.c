@@ -41,6 +41,7 @@
     printf("Number of sample left: %lld\n", (s3p).measurement_config.sampling_left); \
   } while (0)
 
+uint32_t previous_timestamp;
 
 typedef enum{
     UNDEFINED,
@@ -51,6 +52,7 @@ typedef enum{
 typedef enum{
     UNSYNCHED,
     SYNCHED,
+    ARMED,
     MEASURING
 }clock_status_t;
 
@@ -80,6 +82,7 @@ struct S3P_t{
     esp_err_t (*send_packet_func)(uint8_t *, uint16_t); // send packets through interface
     void (*trigger_sampling_func)(uint64_t); // parameter as sample reference. trigger sampling measurement
     void (*start_timer_func)(void *); // parameter for timer handle in oo programming
+    void (*stop_timer_func)(); // parameter for timer handle in oo programming
     void (*soft_restart)(); // for reset command
     watch_time_set_t watch_time_set;
     measurement_config_t measurement_config;
@@ -93,6 +96,7 @@ S3P_t * S3P__create(uint32_t address,
                     esp_err_t (*send_packet_func)(uint8_t *, uint16_t),
                     void (*trigger_sampling_func)(uint64_t), //the sample number
                     void (*start_timer_func)(uint64_t),
+                    void (*stop_timer_func)(),
                     void (*soft_restart)()){
     
     S3P_t * ret = (S3P_t *)malloc(sizeof(S3P_t));
@@ -100,6 +104,7 @@ S3P_t * S3P__create(uint32_t address,
     ret->send_packet_func = send_packet_func;
     ret->trigger_sampling_func = trigger_sampling_func;
     ret->start_timer_func = start_timer_func;
+    ret->stop_timer_func = stop_timer_func;
     ret->clock_status = UNSYNCHED;
     ret->op_status = UNDEFINED;
 
@@ -185,13 +190,14 @@ bool S3P__filter_message(S3P_t * s3p, uint8_t * msg_bytes){
 
 
 esp_err_t S3P__read_message(S3P_t * s3p, uint8_t * msg_bytes, uint16_t msg_length){
-     gettimeofday(&s3p->last_msg_timestamp, NULL /* tz */); // save it asap for later use
-     S3P_msg_t * msg = (S3P_msg_t*)malloc(sizeof(S3P_msg_t));
-     esp_err_t ret = S3P__unpack_message(msg, msg_bytes, msg_length);
+    
+    gettimeofday(&s3p->last_msg_timestamp, NULL /* tz */); // save it asap for later use
+    S3P_msg_t * msg = (S3P_msg_t*)malloc(sizeof(S3P_msg_t));
+    esp_err_t ret = S3P__unpack_message(msg, msg_bytes, msg_length);
 
     ret = S3P__interpret_command(s3p, msg);
 
-     free(msg);
+    free(msg);
     return ret;  
 }
 
@@ -257,7 +263,7 @@ esp_err_t S3P__MCO(S3P_t * s3p, S3P_msg_t * msg){
     s3p->measurement_config.t_next_measurement = TIMEVAL_TO_US_TIME(msg->argument[0],msg->argument[1]);
     s3p->measurement_config.sampling_left = ((uint64_t)msg->argument[2]<<32)+((uint64_t)(msg->argument[3]));
     s3p->measurement_config.t_sampling_period = (time_us_t)msg->argument[4];
-    s3p->clock_status = MEASURING;
+    s3p->clock_status = ARMED;
     PRINT_MEASUREMENT_SET(*s3p);
 
     struct timeval t_now;
@@ -314,7 +320,7 @@ esp_err_t S3P__DRE(S3P_t * s3p, S3P_msg_t * msg){
     // toffset = t2-t1-tdelay
     time_us_t time_offset = s3p->watch_time_set.t2-s3p->watch_time_set.t1-time_delay;
 
-    printf("Calculated Delay (us):%lld\n", time_delay);
+    //printf("Calculated Delay (us):%lld\n", time_delay);
     printf("Calculated Offset (us):%lld\n", time_offset);
 
     struct timeval tv_offset;
@@ -446,31 +452,47 @@ esp_err_t S3P__send_synch(S3P_t * s3p){
     return S3P__send_message_with_time(s3p, NULL, SYN);
 }
 
-void S3P__timer_elapsed(S3P_t * s3p){
+void S3P__timer_elapsed(S3P_t * s3p){  
+    //printf("Sampling period: %lld\n", s3p->measurement_config.t_sampling_period);
         s3p->trigger_sampling_func(s3p->measurement_config.sampling_left);
         if(s3p->measurement_config.sampling_left>0){ // still measurements to do
-            s3p->start_timer_func((uint64_t)s3p->measurement_config.t_sampling_period);
+            if(s3p->clock_status==ARMED){ // i.e. triggered after first waiting period
+                s3p->stop_timer_func();
+                s3p->start_timer_func((uint64_t)s3p->measurement_config.t_sampling_period);
+                s3p->clock_status = MEASURING;
+            } // else is already measuring
             s3p->measurement_config.sampling_left--;
-            //printf("timer elapsed and restarted\n");
+        }else{
+            s3p->stop_timer_func();
+            s3p->clock_status=SYNCHED;
         }
+
 }
 
 void S3P__retrieve_samples(S3P_t * s3p, uint32_t * data, uint8_t size){
-        printf("\nSending samples\n");
-            S3P_msg_t reply_msg = {
-                .destination = 0x00000000,
-                .source = s3p->address,
-                .command = MSR,
-                .argument_length = size,
-                .argument = data
-            };
-            uint32_t msg_length = 0;
-            //printf("\nBefore malloc\n");
-            uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(reply_msg));
-            //printf("\nBefore pack message\n");
-            S3P__pack_message(reply_msg, byte_out, &msg_length); 
-            //printf("\nBefore send_packet_func\n");
-            s3p->send_packet_func(byte_out,msg_length);
+        //printf("\nSending samples\n");
+        struct timeval tnow;
+        gettimeofday(&tnow, NULL);
+        //data = realloc(data, sizeof(uint32_t)*(size+3)); // adding timestamp
+        data[size]=(uint32_t)(tnow.tv_sec<<32);
+        data[size+1] = (uint32_t)(tnow.tv_sec);
+        data[size+2]=tnow.tv_usec;
+        printf("*****>>>> Delta Timestamp: %ld\n", data[size+2]-previous_timestamp);
+        previous_timestamp = data[size+2];
+            // S3P_msg_t reply_msg = {
+            //     .destination = 0x00000000,
+            //     .source = s3p->address,
+            //     .command = MSR,
+            //     .argument_length = size+3,
+            //     .argument = data
+            // };
+            // uint32_t msg_length = 0;
+            // printf("\nBefore malloc\n");
+            // uint8_t * byte_out = (uint8_t*)malloc(S3P__get_message_length(reply_msg));
+            // printf("\nBefore pack message\n");
+            // S3P__pack_message(reply_msg, byte_out, &msg_length); 
+            // printf("\nBefore send_packet_func\n");
+            // s3p->send_packet_func(byte_out,msg_length);
 }
 
 
